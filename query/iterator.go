@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"regexp"
 	"sync"
 	"time"
@@ -1251,6 +1252,10 @@ func newSelectInfo(stmt *influxql.SelectStatement) *selectInfo {
 func (v *selectInfo) Visit(n influxql.Node) influxql.Visitor {
 	switch n := n.(type) {
 	case *influxql.Call:
+		if isMathFunction(n) {
+			// Skip past math functions since they are transformation iterators.
+			return v
+		}
 		v.calls[n] = struct{}{}
 		return nil
 	case *influxql.VarRef:
@@ -1405,6 +1410,85 @@ func (itr *unsignedFloatCastIterator) Next() (*FloatPoint, error) {
 	itr.point.Aux = p.Aux
 	return &itr.point, nil
 }
+
+func isMathFunction(call *influxql.Call) bool {
+	switch call.Name {
+	case "sin", "cos", "tan":
+		return true
+	}
+	return false
+}
+
+func newMathIterator(name string, input Iterator) (Iterator, error) {
+	switch name {
+	case "sin":
+		return newSinIterator(input)
+	case "cos":
+		return newCosIterator(input)
+	case "tan":
+		return newTanIterator(input)
+	default:
+		return nil, fmt.Errorf("unsupported math iterator: %s", name)
+	}
+}
+
+func newSinIterator(input Iterator) (Iterator, error) {
+	switch input := input.(type) {
+	case FloatIterator:
+		return &floatMathIterator{
+			input: input,
+			fn:    math.Sin,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported sin iterator type: %T", input)
+	}
+}
+
+func newCosIterator(input Iterator) (Iterator, error) {
+	switch input := input.(type) {
+	case FloatIterator:
+		return &floatMathIterator{
+			input: input,
+			fn:    math.Cos,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported cos iterator type: %T", input)
+	}
+}
+
+func newTanIterator(input Iterator) (Iterator, error) {
+	switch input := input.(type) {
+	case FloatIterator:
+		return &floatMathIterator{
+			input: input,
+			fn:    math.Tan,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported tan iterator type: %T", input)
+	}
+}
+
+type floatMathIterator struct {
+	input FloatIterator
+	fn    func(x float64) float64
+}
+
+func (itr *floatMathIterator) Next() (*FloatPoint, error) {
+	p, err := itr.input.Next()
+	if err != nil {
+		return nil, err
+	} else if p == nil {
+		return nil, nil
+	}
+
+	if !p.Nil {
+		p.Value = itr.fn(p.Value)
+	}
+	return p, nil
+}
+
+func (itr *floatMathIterator) Stats() IteratorStats { return itr.input.Stats() }
+func (itr *floatMathIterator) Close() error         { return itr.input.Close() }
 
 // IteratorStats represents statistics about an iterator.
 // Some statistics are available immediately upon iterator creation while

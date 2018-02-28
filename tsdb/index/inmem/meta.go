@@ -632,7 +632,9 @@ func (m *measurement) idsForExpr(n *influxql.BinaryExpr) (seriesIDs, influxql.Ex
 	if !ok {
 		name, ok = n.RHS.(*influxql.VarRef)
 		if !ok {
-			return nil, nil, fmt.Errorf("invalid expression: %s", n.String())
+			// This is an expression we do not know how to evaluate. Let the
+			// query engine take care of this.
+			return m.SeriesIDs(), n, nil
 		}
 		value = n.LHS
 	}

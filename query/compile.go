@@ -95,15 +95,7 @@ func newCompiler(opt CompileOptions) *compiledStatement {
 
 func Compile(stmt *influxql.SelectStatement, opt CompileOptions) (Statement, error) {
 	c := newCompiler(opt)
-	if err := c.preprocess(stmt); err != nil {
-		return nil, err
-	}
-	if err := c.compile(stmt); err != nil {
-		return nil, err
-	}
 	c.stmt = stmt.Clone()
-	c.stmt.TimeAlias = c.TimeFieldName
-	c.stmt.Condition = c.Condition
 
 	// Convert DISTINCT into a call.
 	c.stmt.RewriteDistinct()
@@ -113,6 +105,15 @@ func Compile(stmt *influxql.SelectStatement, opt CompileOptions) (Statement, err
 
 	// Rewrite any regex conditions that could make use of the index.
 	c.stmt.RewriteRegexConditions()
+
+	if err := c.preprocess(stmt); err != nil {
+		return nil, err
+	}
+	if err := c.compile(stmt); err != nil {
+		return nil, err
+	}
+	c.stmt.TimeAlias = c.TimeFieldName
+	c.stmt.Condition = c.Condition
 	return c, nil
 }
 
@@ -125,6 +126,10 @@ func (c *compiledStatement) preprocess(stmt *influxql.SelectStatement) error {
 	valuer := influxql.NowValuer{Now: c.Options.Now, Location: stmt.Location}
 	cond, t, err := influxql.ConditionExpr(stmt.Condition, &valuer)
 	if err != nil {
+		return err
+	}
+	// Verify that the condition is actually ok to use.
+	if err := c.validateCondition(cond); err != nil {
 		return err
 	}
 	c.Condition = cond
@@ -179,6 +184,7 @@ func (c *compiledStatement) compile(stmt *influxql.SelectStatement) error {
 }
 
 func (c *compiledStatement) compileFields(stmt *influxql.SelectStatement) error {
+	valuer := &MathLiteralValuer{}
 	c.Fields = make([]*compiledField, 0, len(stmt.Fields))
 	for _, f := range stmt.Fields {
 		// Remove any time selection (it is automatically selected by default)
@@ -197,7 +203,7 @@ func (c *compiledStatement) compileFields(stmt *influxql.SelectStatement) error 
 		field := &compiledField{
 			global: c,
 			Field: &influxql.Field{
-				Expr:  influxql.Reduce(f.Expr, nil),
+				Expr:  influxql.Reduce(f.Expr, valuer),
 				Alias: f.Alias,
 			},
 			AllowWildcard: true,
@@ -244,6 +250,10 @@ func (c *compiledField) compileExpr(expr influxql.Expr) error {
 		c.global.HasAuxiliaryFields = true
 		return nil
 	case *influxql.Call:
+		if isMathFunction(expr) {
+			return c.compileTrigFunction(expr)
+		}
+
 		// Register the function call in the list of function calls.
 		c.global.FunctionCalls = append(c.global.FunctionCalls, expr)
 
@@ -305,6 +315,8 @@ func (c *compiledField) compileExpr(expr influxql.Expr) error {
 		}
 	case *influxql.ParenExpr:
 		return c.compileExpr(expr.Expr)
+	case influxql.Literal:
+		return errors.New("field must contain at least one variable")
 	}
 	return errors.New("unimplemented")
 }
@@ -657,6 +669,13 @@ func (c *compiledField) compileTopBottom(call *influxql.Call) error {
 	return nil
 }
 
+func (c *compiledField) compileTrigFunction(expr *influxql.Call) error {
+	if exp, got := 1, len(expr.Args); exp != got {
+		return fmt.Errorf("invalid number of arguments for %s, expected %d, got %d", expr.Name, exp, got)
+	}
+	return c.compileExpr(expr.Args[0])
+}
+
 func (c *compiledStatement) compileDimensions(stmt *influxql.SelectStatement) error {
 	for _, d := range stmt.Dimensions {
 		switch expr := d.Expr.(type) {
@@ -752,6 +771,35 @@ func (c *compiledStatement) validateFields() error {
 	return nil
 }
 
+// validateCondition verifies that all elements in the condition are appropriate.
+// For example, aggregate calls don't work in the condition and should throw an
+// error as an invalid expression.
+func (c *compiledStatement) validateCondition(expr influxql.Expr) error {
+	switch expr := expr.(type) {
+	case *influxql.BinaryExpr:
+		// Verify each side of the binary expression. We do not need to
+		// verify the binary expression itself since that should have been
+		// done by influxql.ConditionExpr.
+		if err := c.validateCondition(expr.LHS); err != nil {
+			return err
+		}
+		if err := c.validateCondition(expr.RHS); err != nil {
+			return err
+		}
+		return nil
+	case *influxql.Call:
+		if !isMathFunction(expr) {
+			return fmt.Errorf("invalid function call in condition: %s", expr)
+		}
+		if exp, got := 1, len(expr.Args); exp != got {
+			return fmt.Errorf("invalid number of arguments for %s, expected %d, got %d", expr.Name, exp, got)
+		}
+		return c.validateCondition(expr.Args[0])
+	default:
+		return nil
+	}
+}
+
 // subquery compiles and validates a compiled statement for the subquery using
 // this compiledStatement as the parent.
 func (c *compiledStatement) subquery(stmt *influxql.SelectStatement) error {
@@ -763,8 +811,11 @@ func (c *compiledStatement) subquery(stmt *influxql.SelectStatement) error {
 	// Substitute now() into the subquery condition. Then use ConditionExpr to
 	// validate the expression. Do not store the results. We have no way to store
 	// and read those results at the moment.
-	valuer := influxql.NowValuer{Now: c.Options.Now, Location: stmt.Location}
-	stmt.Condition = influxql.Reduce(stmt.Condition, &valuer)
+	valuer := influxql.MultiValuer(
+		&influxql.NowValuer{Now: c.Options.Now, Location: stmt.Location},
+		&MathLiteralValuer{},
+	)
+	stmt.Condition = influxql.Reduce(stmt.Condition, valuer)
 
 	// If the ordering is different and the sort field was specified for the subquery,
 	// throw an error.

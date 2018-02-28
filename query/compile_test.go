@@ -82,6 +82,10 @@ func TestCompile_Success(t *testing.T) {
 		`SELECT value FROM (SELECT value FROM cpu) ORDER BY time DESC`,
 		`SELECT count(distinct(value)), max(value) FROM cpu`,
 		`SELECT last(value) / (1 - 0) FROM cpu`,
+		`SELECT sin(value), cos(value) FROM cpu`,
+		`SELECT sin(max(value)) FROM cpu WHERE time >= now() - 1m GROUP BY time(10s)`,
+		`SELECT sin(value) / cos(2) FROM cpu`,
+		`SELECT cos(value) FROM cpu WHERE sin(value) > 0.5`,
 	} {
 		t.Run(tt, func(t *testing.T) {
 			stmt, err := influxql.ParseStatement(tt)
@@ -318,6 +322,10 @@ func TestCompile_Failures(t *testing.T) {
 		{s: `SELECT value FROM myseries WHERE value OR time >= now() - 1m`, err: `invalid condition expression: value`},
 		{s: `SELECT value FROM myseries WHERE time >= now() - 1m OR value`, err: `invalid condition expression: value`},
 		{s: `SELECT value FROM (SELECT value FROM cpu ORDER BY time DESC) ORDER BY time ASC`, err: `subqueries must be ordered in the same direction as the query itself`},
+		{s: `SELECT max(cos(value)) FROM cpu WHERE time >= now() - 1m GROUP BY time(10s)`, err: `expected field argument in max()`},
+		{s: `SELECT sin(2) / cos(2) FROM cpu`, err: `field must contain at least one variable`},
+		{s: `SELECT value FROM cpu WHERE max(value) > 50`, err: `invalid function call in condition: max(value)`},
+		{s: `SELECT value FROM cpu WHERE sin(value)`, err: `invalid condition expression: sin(value)`},
 	} {
 		t.Run(tt.s, func(t *testing.T) {
 			stmt, err := influxql.ParseStatement(tt.s)

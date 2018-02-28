@@ -286,6 +286,20 @@ func buildAuxIterator(expr influxql.Expr, aitr AuxIterator, opt IteratorOptions)
 	switch expr := expr.(type) {
 	case *influxql.VarRef:
 		return aitr.Iterator(expr.Val, expr.Type), nil
+	case *influxql.Call:
+		input, err := buildAuxIterator(expr.Args[0], aitr, opt)
+		if err != nil {
+			return nil, err
+		}
+
+		itr, err := newMathIterator(expr.Name, input)
+		if err != nil {
+			input.Close()
+			return nil, err
+		} else if itr == nil {
+			itr = &nilFloatIterator{}
+		}
+		return itr, nil
 	case *influxql.BinaryExpr:
 		if rhs, ok := expr.RHS.(influxql.Literal); ok {
 			// The right hand side is a literal. It is more common to have the RHS be a literal,
@@ -426,6 +440,21 @@ func buildExprIterator(ctx context.Context, expr influxql.Expr, ic IteratorCreat
 	case *influxql.VarRef:
 		return b.buildVarRefIterator(ctx, expr)
 	case *influxql.Call:
+		if isMathFunction(expr) {
+			input, err := buildExprIterator(ctx, expr.Args[0], b.ic, b.sources, b.opt, b.selector, b.writeMode)
+			if err != nil {
+				return nil, err
+			}
+
+			itr, err := newMathIterator(expr.Name, input)
+			if err != nil {
+				input.Close()
+				return nil, err
+			} else if itr == nil {
+				itr = &nilFloatIterator{}
+			}
+			return itr, nil
+		}
 		return b.buildCallIterator(ctx, expr)
 	case *influxql.BinaryExpr:
 		return b.buildBinaryExprIterator(ctx, expr)
@@ -1813,5 +1842,60 @@ func booleanBinaryExprFunc(op influxql.Token) interface{} {
 	case influxql.BITWISE_XOR:
 		return func(lhs, rhs bool) bool { return lhs != rhs }
 	}
+	return nil
+}
+
+type MathLiteralValuer struct {
+	Valuer influxql.Valuer
+}
+
+func (v *MathLiteralValuer) Value(key string) (interface{}, bool) {
+	if v.Valuer != nil {
+		return v.Valuer.Value(key)
+	}
+	return nil, false
+}
+
+func (v *MathLiteralValuer) Call(name string, args []influxql.Expr) (interface{}, bool) {
+	if len(args) == 1 {
+		switch name {
+		case "sin":
+			return v.callTrigFunction(math.Sin, args[0])
+		case "cos":
+			return v.callTrigFunction(math.Cos, args[0])
+		case "tan":
+			return v.callTrigFunction(math.Tan, args[0])
+		}
+	}
+	return nil, false
+}
+
+func (v *MathLiteralValuer) callTrigFunction(fn func(x float64) float64, arg0 influxql.Expr) (interface{}, bool) {
+	var value float64
+	switch arg0 := arg0.(type) {
+	case *influxql.NumberLiteral:
+		value = arg0.Val
+	case *influxql.IntegerLiteral:
+		value = float64(arg0.Val)
+	case *influxql.VarRef:
+		if v.Valuer == nil {
+			return nil, false
+		} else if val, ok := v.Valuer.Value(arg0.Val); ok {
+			switch val := val.(type) {
+			case float64:
+				value = val
+			case int64:
+				value = float64(val)
+			}
+		} else {
+			return nil, false
+		}
+	default:
+		return nil, false
+	}
+	return fn(value), true
+}
+
+func (v *MathLiteralValuer) Zone() *time.Location {
 	return nil
 }

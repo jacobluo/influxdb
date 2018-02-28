@@ -31,15 +31,6 @@ type seriesRow struct {
 	valueCond               influxql.Expr
 }
 
-type mapValuer map[string]string
-
-var _ influxql.Valuer = mapValuer(nil)
-
-func (vs mapValuer) Value(key string) (interface{}, bool) {
-	v, ok := vs[key]
-	return v, ok
-}
-
 type indexSeriesCursor struct {
 	sitr            query.FloatIterator
 	fields          []string
@@ -47,7 +38,7 @@ type indexSeriesCursor struct {
 	err             error
 	eof             bool
 	tags            models.Tags
-	filterset       mapValuer
+	filterset       influxql.MapValuer
 	cond            influxql.Expr
 	measurementCond influxql.Expr
 	row             seriesRow
@@ -160,7 +151,7 @@ RETRY:
 		c.row.measurement = string(mm)
 		c.tags = models.ParseTags(keyb)
 
-		c.filterset = mapValuer{"_name": c.row.measurement}
+		c.filterset = influxql.MapValuer{"_name": c.row.measurement}
 		for _, tag := range c.tags {
 			c.filterset[string(tag.Key)] = string(tag.Value)
 		}

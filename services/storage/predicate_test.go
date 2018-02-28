@@ -150,15 +150,6 @@ func TestRewriteExprRemoveFieldKeyAndValue(t *testing.T) {
 	expr = storage.RewriteExprRemoveFieldKeyAndValue(expr)
 	assert.Equal(t, expr.String(), `host = 'host1' AND true AND true`)
 
-	expr = influxql.Reduce(expr, mapValuer{"host": "host1"})
+	expr = influxql.Reduce(expr, influxql.MapValuer{"host": "host1"})
 	assert.Equal(t, expr.String(), `true`)
-}
-
-type mapValuer map[string]string
-
-var _ influxql.Valuer = mapValuer(nil)
-
-func (vs mapValuer) Value(key string) (interface{}, bool) {
-	v, ok := vs[key]
-	return v, ok
 }
