@@ -93,23 +93,25 @@ func newIndexSeriesCursor(ctx context.Context, req *ReadRequest, shards []*tsdb.
 
 	// TODO(sgc): tsdb.Store or tsdb.ShardGroup should provide an API to enumerate series efficiently
 	sg := tsdb.Shards(shards)
-	var itr query.Iterator
+	var (
+		itr query.Iterator
+		fi  query.FloatIterator
+	)
 	if itr, err = sg.CreateIterator(ctx, &influxql.Measurement{SystemIterator: "_series"}, opt); itr != nil && err == nil {
-		itr = query.NewDedupeIterator(itr)
-
-		if p.sitr, err = toFloatIterator(itr); err != nil {
+		if fi, err = toFloatIterator(itr); err != nil {
 			itr.Close()
 			goto CLEANUP
+		} else {
+			p.sitr = &orderedDedupeIterator{FloatIterator: fi}
 		}
 
 		if itr, err = sg.CreateIterator(ctx, &influxql.Measurement{SystemIterator: "_fieldKeys"}, opt); itr != nil && err == nil {
-			var fitr query.FloatIterator
-			if fitr, err = toFloatIterator(itr); err != nil {
+			if fi, err = toFloatIterator(itr); err != nil {
 				goto CLEANUP
 			}
 
-			p.fields = extractFields(fitr)
-			fitr.Close()
+			p.fields = extractFields(fi)
+			fi.Close()
 			return p, nil
 		}
 	}
